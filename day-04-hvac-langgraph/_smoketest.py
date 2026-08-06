@@ -17,17 +17,16 @@ def run(title, inputs):
                      ("problem", "is_emergency", "address", "time_preference", "done")})
 
 
-run("Emergency + loop-back (change time)", [
-    "My heat is out and it's freezing in here",
-    "123 Main Street",
-    "tonight around 9",
-    "actually, can you change it to tomorrow morning instead",
-    "tomorrow morning at 8",
-    "yes please",
+run("Emergency + INLINE time correction at confirm", [
+    "it's 95 degrees, no AC, and my baby is home",
+    "987 Oak Street",
+    "tomorrow at 9pm",
+    "actually make it 8pm",   # <-- inline correction; should update time and re-confirm
+    "yes",
 ])
 
 run("Routine, straight through", [
-    "My AC is making a rattling noise",
+    "my AC is making a rattling noise",
     "45 Oak Avenue",
     "Saturday afternoon",
     "yes",
