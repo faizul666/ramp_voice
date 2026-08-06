@@ -10,6 +10,8 @@ Setup:  put GOOGLE_API_KEY=... in a .env file (see .env.example)
 Try it: python graph.py
 """
 
+from __future__ import annotations  # lazy annotations: forward refs work on 3.12+
+
 import json
 import os
 from typing import TypedDict
