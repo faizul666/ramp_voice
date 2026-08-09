@@ -12,8 +12,10 @@ Run:  uvicorn main:app --port 8000
 """
 
 import json
+import os
 import time
 
+import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -50,6 +52,44 @@ def advance(session_id: str, message: str) -> dict:
 @app.get("/health")
 def health():
     return {"ok": True}
+
+
+# ---------- real booking endpoint (Retell / any agent can call this) ----------
+
+@app.post("/book")
+async def book(req: Request):
+    """Insert a real HVAC booking row into Supabase. Called as a tool by the agent.
+    Reads SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY from the environment."""
+    data = await req.json()
+    row = {
+        "caller_name": data.get("name") or data.get("caller_name"),
+        "address": data.get("address"),
+        "problem": data.get("problem"),
+        "is_emergency": data.get("is_emergency"),
+        "time_preference": data.get("time_preference") or data.get("time"),
+        "source": data.get("source") or "retell",
+    }
+
+    url = os.getenv("SUPABASE_URL")
+    key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+    if not (url and key):
+        return {"ok": False, "error": "supabase not configured"}
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        r = await client.post(
+            f"{url}/rest/v1/hvac_bookings",
+            headers={
+                "apikey": key,
+                "Authorization": f"Bearer {key}",
+                "Content-Type": "application/json",
+                "Prefer": "return=minimal",
+            },
+            json=row,
+        )
+    ok = r.status_code < 300
+    # Return a short, speakable result the agent can confirm with.
+    return {"ok": ok, "status": r.status_code,
+            "message": "Booking saved." if ok else "Booking failed to save."}
 
 
 # ---------- simple JSON endpoint (local testing) ----------
