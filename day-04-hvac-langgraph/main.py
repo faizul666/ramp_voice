@@ -89,14 +89,33 @@ async def book(req: Request):
                 "apikey": key,
                 "Authorization": f"Bearer {key}",
                 "Content-Type": "application/json",
-                "Prefer": "return=minimal",
+                "Prefer": "return=representation",  # ask Supabase to return the new row
             },
             json=row,
         )
+
     ok = r.status_code < 300
-    # Return a short, speakable result the agent can confirm with.
-    return {"ok": ok, "status": r.status_code,
-            "message": "Booking saved." if ok else "Booking failed to save."}
+    booking_id = None
+    confirmation_code = None
+    if ok:
+        try:
+            created = r.json()
+            if isinstance(created, list) and created:
+                booking_id = created[0].get("id")
+                if booking_id:
+                    # short, speakable code (first 6 hex chars of the uuid)
+                    confirmation_code = booking_id.replace("-", "")[:6].upper()
+        except Exception:
+            pass
+
+    return {
+        "ok": ok,
+        "status": r.status_code,
+        "booking_id": booking_id,
+        "confirmation_code": confirmation_code,
+        "message": (f"Booking saved. Confirmation code {confirmation_code}."
+                    if ok else "Booking failed to save."),
+    }
 
 
 # ---------- simple JSON endpoint (local testing) ----------
