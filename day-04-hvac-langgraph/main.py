@@ -16,7 +16,7 @@ import os
 import time
 
 import httpx
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -59,7 +59,14 @@ def health():
 @app.post("/book")
 async def book(req: Request):
     """Insert a real HVAC booking row into Supabase. Called as a tool by the agent.
-    Reads SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY from the environment."""
+    Reads SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY from the environment.
+
+    Auth: if BOOK_API_SECRET is set, requires a matching `x-api-key` header.
+    (If it's unset, the endpoint stays open — fine for local testing, set it for prod.)"""
+    secret = os.getenv("BOOK_API_SECRET")
+    if secret and req.headers.get("x-api-key") != secret:
+        raise HTTPException(status_code=401, detail="unauthorized")
+
     data = await req.json()
     row = {
         "caller_name": data.get("name") or data.get("caller_name"),
