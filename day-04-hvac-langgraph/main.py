@@ -68,13 +68,28 @@ async def book(req: Request):
         raise HTTPException(status_code=401, detail="unauthorized")
 
     data = await req.json()
+
+    # Retell wraps the function parameters inside "args" and puts the function
+    # name at the top level. VAPI / curl send them flat. Accept either shape:
+    # start from top-level, then let "args" override so Retell calls work too.
+    fields = dict(data)
+    if isinstance(data.get("args"), dict):
+        fields = {**data, **data["args"]}
+
+    def as_bool(v):
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, str):
+            return v.strip().lower() in ("true", "yes", "1", "emergency", "urgent")
+        return bool(v)
+
     row = {
-        "caller_name": data.get("name") or data.get("caller_name"),
-        "address": data.get("address"),
-        "problem": data.get("problem"),
-        "is_emergency": data.get("is_emergency"),
-        "time_preference": data.get("time_preference") or data.get("time"),
-        "source": data.get("source") or "retell",
+        "caller_name": fields.get("caller_name") or fields.get("name"),
+        "address": fields.get("address"),
+        "problem": fields.get("problem"),
+        "is_emergency": as_bool(fields.get("is_emergency")),
+        "time_preference": fields.get("time_preference") or fields.get("time"),
+        "source": fields.get("source") or "retell",
     }
 
     url = os.getenv("SUPABASE_URL")
