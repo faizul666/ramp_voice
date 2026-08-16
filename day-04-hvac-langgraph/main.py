@@ -56,6 +56,33 @@ def health():
 
 # ---------- real booking endpoint (Retell / any agent can call this) ----------
 
+async def _send_sms(to: str | None, body: str) -> dict:
+    """Best-effort Twilio SMS. Returns a status dict; never raises, so a texting
+    problem can't fail a booking. No-ops cleanly if Twilio env vars are missing.
+
+    Env: TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER.
+    """
+    sid = os.getenv("TWILIO_ACCOUNT_SID")
+    token = os.getenv("TWILIO_AUTH_TOKEN")
+    from_num = os.getenv("TWILIO_FROM_NUMBER")
+    if not (sid and token and from_num and to):
+        return {"sent": False, "reason": "twilio not configured or no recipient"}
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.post(
+                f"https://api.twilio.com/2010-04-01/Accounts/{sid}/Messages.json",
+                auth=(sid, token),
+                data={"To": to, "From": from_num, "Body": body},
+            )
+        if r.status_code < 300:
+            return {"sent": True, "sid": r.json().get("sid")}
+        # Twilio returns a helpful JSON error (e.g. code 21608 = unverified number
+        # on trial, 21612 = geo-permission blocked). Surface it for debugging.
+        return {"sent": False, "reason": f"twilio {r.status_code}", "detail": r.text[:300]}
+    except Exception as e:
+        return {"sent": False, "reason": str(e)[:200]}
+
+
 @app.post("/book")
 async def book(req: Request):
     """Insert a real HVAC booking row into Supabase. Called as a tool by the agent.
@@ -123,11 +150,29 @@ async def book(req: Request):
         except Exception:
             pass
 
+    # Real SMS confirmation (best-effort — never blocks/fails the booking).
+    # Recipient: the caller's phone if the flow collected one, else a fixed
+    # demo number (SMS_TO_FALLBACK). On a Twilio trial this MUST be a verified
+    # number, so for the demo set SMS_TO_FALLBACK to your verified phone.
+    sms = {"sent": False, "reason": "booking not saved"}
+    if ok:
+        to = fields.get("phone") or fields.get("to") or os.getenv("SMS_TO_FALLBACK")
+        urgent = " (flagged URGENT)" if row["is_emergency"] else ""
+        body = (
+            f"AllSeasons HVAC: you're booked{urgent}. "
+            f"{row['problem'] or 'your HVAC issue'} at "
+            f"{row['address'] or 'your address'}, "
+            f"{row['time_preference'] or 'the scheduled time'}. "
+            f"Confirmation code {confirmation_code}."
+        )
+        sms = await _send_sms(to, body)
+
     return {
         "ok": ok,
         "status": r.status_code,
         "booking_id": booking_id,
         "confirmation_code": confirmation_code,
+        "sms": sms,
         "message": (f"Booking saved. Confirmation code {confirmation_code}."
                     if ok else "Booking failed to save."),
     }
