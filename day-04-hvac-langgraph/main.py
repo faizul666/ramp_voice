@@ -28,6 +28,9 @@ app = FastAPI(title="HVAC Receptionist")
 # Fine for dev; a real deploy would use Redis/DB so it survives restarts.
 sessions: dict[str, dict] = {}
 
+# Call ids that have already booked, so a completed call books exactly once.
+_booked_sessions: set[str] = set()
+
 
 def advance(session_id: str, message: str) -> dict:
     """Advance one caller turn. Returns the graph state after this turn."""
@@ -97,38 +100,25 @@ async def _send_sms(to: str | None, body: str) -> dict:
         return {"sent": False, "reason": str(e)[:200]}
 
 
-@app.post("/book")
-async def book(req: Request):
-    """Insert a real HVAC booking row into Supabase. Called as a tool by the agent.
-    Reads SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY from the environment.
+def _as_bool(v) -> bool:
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, str):
+        return v.strip().lower() in ("true", "yes", "1", "emergency", "urgent")
+    return bool(v)
 
-    Auth: if BOOK_API_SECRET is set, requires a matching `x-api-key` header.
-    (If it's unset, the endpoint stays open — fine for local testing, set it for prod.)"""
-    secret = os.getenv("BOOK_API_SECRET")
-    if secret and req.headers.get("x-api-key") != secret:
-        raise HTTPException(status_code=401, detail="unauthorized")
 
-    data = await req.json()
-
-    # Retell wraps the function parameters inside "args" and puts the function
-    # name at the top level. VAPI / curl send them flat. Accept either shape:
-    # start from top-level, then let "args" override so Retell calls work too.
-    fields = dict(data)
-    if isinstance(data.get("args"), dict):
-        fields = {**data, **data["args"]}
-
-    def as_bool(v):
-        if isinstance(v, bool):
-            return v
-        if isinstance(v, str):
-            return v.strip().lower() in ("true", "yes", "1", "emergency", "urgent")
-        return bool(v)
-
+async def save_booking(fields: dict) -> dict:
+    """Save a booking to Supabase and send a best-effort confirmation message.
+    Shared by BOTH callers: the /book HTTP endpoint (Retell) and the VAPI voice
+    flow (called from /chat/completions when the LangGraph run completes).
+    Returns {ok, status, booking_id, confirmation_code, sms, message}.
+    """
     row = {
         "caller_name": fields.get("caller_name") or fields.get("name"),
         "address": fields.get("address"),
         "problem": fields.get("problem"),
-        "is_emergency": as_bool(fields.get("is_emergency")),
+        "is_emergency": _as_bool(fields.get("is_emergency")),
         "time_preference": fields.get("time_preference") or fields.get("time"),
         "source": fields.get("source") or "retell",
     }
@@ -164,10 +154,10 @@ async def book(req: Request):
         except Exception:
             pass
 
-    # Real SMS confirmation (best-effort — never blocks/fails the booking).
-    # Recipient: the caller's phone if the flow collected one, else a fixed
-    # demo number (SMS_TO_FALLBACK). On a Twilio trial this MUST be a verified
-    # number, so for the demo set SMS_TO_FALLBACK to your verified phone.
+    # Real confirmation message (best-effort — never blocks/fails the booking).
+    # Recipient: the caller's phone if the flow collected one, else a fixed demo
+    # number (SMS_TO_FALLBACK). On a Twilio trial this must be a verified/joined
+    # number (or a WhatsApp-sandbox participant).
     sms = {"sent": False, "reason": "booking not saved"}
     if ok:
         to = fields.get("phone") or fields.get("to") or os.getenv("SMS_TO_FALLBACK")
@@ -190,6 +180,29 @@ async def book(req: Request):
         "message": (f"Booking saved. Confirmation code {confirmation_code}."
                     if ok else "Booking failed to save."),
     }
+
+
+@app.post("/book")
+async def book(req: Request):
+    """Insert a real HVAC booking row into Supabase. Called as a tool by the agent.
+    Reads SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY from the environment.
+
+    Auth: if BOOK_API_SECRET is set, requires a matching `x-api-key` header.
+    (If it's unset, the endpoint stays open — fine for local testing, set it for prod.)"""
+    secret = os.getenv("BOOK_API_SECRET")
+    if secret and req.headers.get("x-api-key") != secret:
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+    data = await req.json()
+
+    # Retell wraps the function parameters inside "args" and puts the function
+    # name at the top level. VAPI / curl send them flat. Accept either shape:
+    # start from top-level, then let "args" override so Retell calls work too.
+    fields = dict(data)
+    if isinstance(data.get("args"), dict):
+        fields = {**data, **data["args"]}
+
+    return await save_booking(fields)
 
 
 # ---------- simple JSON endpoint (local testing) ----------
@@ -249,4 +262,18 @@ async def chat_completions(req: Request):
     last_user = (user_msgs[-1].get("content") if user_msgs else "") or ""
 
     state = advance(session_id, last_user)
+
+    # When the LangGraph flow reaches "done" (caller confirmed), book for REAL —
+    # same Supabase insert + WhatsApp/SMS as the /book endpoint. Guard so a call
+    # books only once, even though the model may ping us again after completion.
+    if state.get("done") and session_id not in _booked_sessions:
+        _booked_sessions.add(session_id)
+        await save_booking({
+            "problem": state.get("problem"),
+            "address": state.get("address"),
+            "is_emergency": state.get("is_emergency"),
+            "time_preference": state.get("time_preference"),
+            "source": "vapi",
+        })
+
     return _sse_openai(state["reply"])
