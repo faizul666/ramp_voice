@@ -11,13 +11,14 @@ advances the state machine by one turn.
 Run:  uvicorn main:app --port 8000
 """
 
+import html
 import json
 import os
 import time
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
 from graph import graph
@@ -203,6 +204,118 @@ async def book(req: Request):
         fields = {**data, **data["args"]}
 
     return await save_booking(fields)
+
+
+# ---------- live dashboard (what the client watches during a demo) ----------
+
+async def _fetch_bookings(limit: int = 50) -> list[dict]:
+    """Read recent bookings from Supabase (server-side, so no key in the browser)."""
+    url = os.getenv("SUPABASE_URL")
+    key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+    if not (url and key):
+        return []
+    headers = {"apikey": key, "Authorization": f"Bearer {key}"}
+    async with httpx.AsyncClient(timeout=15) as client:
+        # Try newest-first; fall back to unordered if there's no created_at column.
+        r = await client.get(
+            f"{url}/rest/v1/hvac_bookings?select=*&order=created_at.desc&limit={limit}",
+            headers=headers,
+        )
+        if r.status_code >= 300:
+            r = await client.get(
+                f"{url}/rest/v1/hvac_bookings?select=*&limit={limit}", headers=headers
+            )
+    try:
+        rows = r.json()
+        return rows if isinstance(rows, list) else []
+    except Exception:
+        return []
+
+
+@app.get("/dashboard", response_class=HTMLResponse)
+async def dashboard():
+    """A simple, auto-refreshing table of bookings — the page a client watches
+    during a demo. Rows appear live as calls come in. Read-only, no login."""
+    rows = await _fetch_bookings()
+
+    def esc(v) -> str:
+        return html.escape("" if v is None else str(v))
+
+    def code(row) -> str:
+        rid = row.get("id")
+        return rid.replace("-", "")[:6].upper() if rid else "—"
+
+    if rows:
+        body_rows = ""
+        for row in rows:
+            urgent = _as_bool(row.get("is_emergency"))
+            badge = ('<span class="badge urgent">URGENT</span>' if urgent
+                     else '<span class="badge ok">routine</span>')
+            src = esc(row.get("source") or "—")
+            body_rows += (
+                f'<tr class="{"row-urgent" if urgent else ""}">'
+                f"<td class=mono>{code(row)}</td>"
+                f"<td>{esc(row.get('caller_name') or '—')}</td>"
+                f"<td>{esc(row.get('problem'))} {badge}</td>"
+                f"<td>{esc(row.get('address'))}</td>"
+                f"<td>{esc(row.get('time_preference'))}</td>"
+                f'<td><span class="src">{src}</span></td>'
+                f"<td class=mono>{esc((row.get('created_at') or '')[:19].replace('T', ' '))}</td>"
+                "</tr>"
+            )
+        table = (
+            "<table><thead><tr>"
+            "<th>Code</th><th>Name</th><th>Problem</th><th>Address</th>"
+            "<th>Preferred time</th><th>Via</th><th>Booked at (UTC)</th>"
+            "</tr></thead><tbody>" + body_rows + "</tbody></table>"
+        )
+    else:
+        table = '<p class="empty">No bookings yet. Make a call and watch this page. 📞</p>'
+
+    page = f"""<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="5">
+<title>AllSeasons HVAC — Bookings</title>
+<style>
+  :root {{ color-scheme: light dark; }}
+  * {{ box-sizing: border-box; }}
+  body {{ margin:0; font-family: -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+         background:#0f172a; color:#e2e8f0; }}
+  .wrap {{ max-width: 1100px; margin: 0 auto; padding: 24px 16px 60px; }}
+  header {{ display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px; }}
+  h1 {{ font-size: 20px; margin: 0; }}
+  h1 span {{ color:#38bdf8; }}
+  .sub {{ color:#94a3b8; font-size: 13px; }}
+  .live {{ font-size:12px; color:#0f172a; background:#4ade80; padding:3px 9px; border-radius:999px; font-weight:700; }}
+  .count {{ color:#94a3b8; font-size:13px; margin:14px 0 8px; }}
+  .scroll {{ overflow-x:auto; border:1px solid #1e293b; border-radius:12px; }}
+  table {{ border-collapse: collapse; width:100%; font-size:14px; }}
+  th, td {{ text-align:left; padding:11px 14px; border-bottom:1px solid #1e293b; white-space:nowrap; }}
+  th {{ background:#111827; color:#94a3b8; font-weight:600; font-size:12px; text-transform:uppercase; letter-spacing:.04em; }}
+  tbody tr:hover {{ background:#131f38; }}
+  .row-urgent {{ background: rgba(248,113,113,.08); }}
+  .mono {{ font-family: ui-monospace,SFMono-Regular,Menlo,monospace; color:#cbd5e1; }}
+  .badge {{ font-size:11px; padding:2px 8px; border-radius:999px; font-weight:700; margin-left:6px; }}
+  .badge.urgent {{ background:#7f1d1d; color:#fecaca; }}
+  .badge.ok {{ background:#14532d; color:#bbf7d0; }}
+  .src {{ font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:#38bdf8;
+         border:1px solid #1e3a5f; padding:2px 8px; border-radius:6px; }}
+  .empty {{ color:#94a3b8; padding:40px; text-align:center; font-size:16px; }}
+</style></head>
+<body><div class="wrap">
+  <header>
+    <div>
+      <h1>AllSeasons <span>HVAC</span> — Live Bookings</h1>
+      <div class="sub">After-hours AI receptionist · auto-refreshes every 5s</div>
+    </div>
+    <span class="live">● LIVE</span>
+  </header>
+  <div class="count">{len(rows)} booking{"" if len(rows)==1 else "s"}</div>
+  <div class="scroll">{table}</div>
+</div></body></html>"""
+    return HTMLResponse(page)
 
 
 # ---------- simple JSON endpoint (local testing) ----------
