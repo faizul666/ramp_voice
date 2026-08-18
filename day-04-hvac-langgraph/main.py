@@ -57,14 +57,28 @@ def health():
 # ---------- real booking endpoint (Retell / any agent can call this) ----------
 
 async def _send_sms(to: str | None, body: str) -> dict:
-    """Best-effort Twilio SMS. Returns a status dict; never raises, so a texting
+    """Best-effort Twilio message. Returns a status dict; never raises, so a texting
     problem can't fail a booking. No-ops cleanly if Twilio env vars are missing.
 
-    Env: TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER.
+    Channel: if TWILIO_WHATSAPP_FROM is set (e.g. 'whatsapp:+14155238886') it sends
+    over WhatsApp — the only channel that reaches a Bangladesh number on a trial.
+    Otherwise it falls back to plain SMS via TWILIO_FROM_NUMBER.
+
+    Env: TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, and one of
+         TWILIO_WHATSAPP_FROM (WhatsApp) / TWILIO_FROM_NUMBER (SMS).
     """
     sid = os.getenv("TWILIO_ACCOUNT_SID")
     token = os.getenv("TWILIO_AUTH_TOKEN")
-    from_num = os.getenv("TWILIO_FROM_NUMBER")
+    wa_from = os.getenv("TWILIO_WHATSAPP_FROM")   # WhatsApp takes priority if set
+    sms_from = os.getenv("TWILIO_FROM_NUMBER")
+
+    if wa_from:
+        from_num = wa_from
+        to_addr = to if (to or "").startswith("whatsapp:") else f"whatsapp:{to}"
+    else:
+        from_num = sms_from
+        to_addr = to
+
     if not (sid and token and from_num and to):
         return {"sent": False, "reason": "twilio not configured or no recipient"}
     try:
@@ -72,7 +86,7 @@ async def _send_sms(to: str | None, body: str) -> dict:
             r = await client.post(
                 f"https://api.twilio.com/2010-04-01/Accounts/{sid}/Messages.json",
                 auth=(sid, token),
-                data={"To": to, "From": from_num, "Body": body},
+                data={"To": to_addr, "From": from_num, "Body": body},
             )
         if r.status_code < 300:
             return {"sent": True, "sid": r.json().get("sid")}
