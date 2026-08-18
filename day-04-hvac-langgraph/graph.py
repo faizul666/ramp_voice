@@ -137,6 +137,7 @@ class HVACState(TypedDict, total=False):
     step: str
     user_input: str
     reply: str
+    caller_name: str
     problem: str
     is_emergency: bool
     address: str
@@ -147,7 +148,8 @@ class HVACState(TypedDict, total=False):
 
 def summary(state: HVACState) -> str:
     tag = "URGENT — " if state.get("is_emergency") else ""
-    return (f"{tag}{state.get('problem', '(problem)')} at "
+    who = f"{state['caller_name']}, " if state.get("caller_name") else ""
+    return (f"{tag}{who}{state.get('problem', '(problem)')} at "
             f"{state.get('address', '(address)')}, "
             f"preferred time {state.get('time_preference', '(time)')}")
 
@@ -170,7 +172,16 @@ def identify_problem(state: HVACState) -> HVACState:
     return {
         "problem": problem,
         "is_emergency": emergency,
-        "reply": ack + "What's the service address?",
+        "reply": ack + "Can I get your name?",
+        "step": "collect_name",
+    }
+
+
+def collect_name(state: HVACState) -> HVACState:
+    name = state.get("user_input", "").strip()
+    return {
+        "caller_name": name,
+        "reply": f"Thanks{', ' + name if name else ''}. What's the service address?",
         "step": "collect_address",
     }
 
@@ -253,6 +264,7 @@ def after_confirm(state: HVACState) -> str:
 builder = StateGraph(HVACState)
 for name, fn in [
     ("greet", greet), ("identify_problem", identify_problem),
+    ("collect_name", collect_name),
     ("collect_address", collect_address), ("time_preference", time_preference),
     ("confirm", confirm), ("send_sms", send_sms),
 ]:
@@ -260,10 +272,12 @@ for name, fn in [
 
 builder.add_conditional_edges(START, entry, {
     "greet": "greet", "identify_problem": "identify_problem",
+    "collect_name": "collect_name",
     "collect_address": "collect_address", "time_preference": "time_preference",
     "confirm": "confirm", "send_sms": "send_sms", "done": END,
 })
-for name in ["greet", "identify_problem", "collect_address", "time_preference", "send_sms"]:
+for name in ["greet", "identify_problem", "collect_name",
+             "collect_address", "time_preference", "send_sms"]:
     builder.add_edge(name, END)
 builder.add_conditional_edges("confirm", after_confirm, {"send_sms": "send_sms", "wait": END})
 

@@ -382,6 +382,7 @@ async def chat_completions(req: Request):
     if state.get("done") and session_id not in _booked_sessions:
         _booked_sessions.add(session_id)
         await save_booking({
+            "caller_name": state.get("caller_name"),
             "problem": state.get("problem"),
             "address": state.get("address"),
             "is_emergency": state.get("is_emergency"),
